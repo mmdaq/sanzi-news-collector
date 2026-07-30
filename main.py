@@ -66,14 +66,30 @@ def main():
         health_checker = HealthChecker()
         health_checker.get_report(len(all_news), errors)
 
+        # 【修复逻辑 1】：如果 0 条新闻，直接成功退出，不触发邮件发送，避免 550 SMTP 错误
         if not all_news:
-            logger.warning("⚠️ 未采集到任何新闻，将发送空简报")
+            logger.warning("⚠️ 未采集到任何新闻，将保存空简报并跳过邮件发送流程")
+            
+            # 依然生成空简报并保存，以便在 Actions Artifacts 中查看
+            generator = BriefGenerator(config)
+            html_brief = generator.generate_html(all_news)
+            text_brief = generator.generate_text(all_news)
+
+            with open(f"{config.data_dir}/brief_{datetime.now().strftime('%Y%m%d')}.html", 'w', encoding='utf-8') as f:
+                f.write(html_brief)
+            logger.info("✅ 空简报已保存")
+
+            logger.info("=" * 60)
+            logger.info("✅ 程序执行完成（无新闻，跳过邮件）")
+            logger.info("=" * 60)
+            sys.exit(0)
 
         logger.info("生成简报...")
         generator = BriefGenerator(config)
         html_brief = generator.generate_html(all_news)
         text_brief = generator.generate_text(all_news)
 
+        # 强制确保文件写入使用 utf-8，防止 Linux 环境下崩溃
         with open(f"{config.data_dir}/brief_{datetime.now().strftime('%Y%m%d')}.html", 'w', encoding='utf-8') as f:
             f.write(html_brief)
         logger.info("✅ 简报已保存")
@@ -88,10 +104,12 @@ def main():
             logger.info("✅ 程序执行完成！")
             logger.info("=" * 60)
         else:
+            # 【修复逻辑 2】：即使邮件发失败，也视为任务本身执行完成，不终止 Action
             logger.error("=" * 60)
-            logger.error("❌ 程序执行完成，但邮件发送失败")
+            logger.error("⚠️ 程序执行完成，但邮件发送失败")
+            logger.error("   请检查邮箱配置 (SENDER_EMAIL/SENDER_PASSWORD)")
             logger.error("=" * 60)
-            sys.exit(1)
+            sys.exit(0)
 
     except KeyboardInterrupt:
         logger.info("程序被用户中断")
