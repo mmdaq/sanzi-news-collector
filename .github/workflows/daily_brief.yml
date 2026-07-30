@@ -1,0 +1,48 @@
+name: 每日三资监管简报
+
+on:
+  schedule:
+    # 每天上午8:30（北京时间 UTC+8）执行
+    - cron: '30 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collect-and-send:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+    
+    - name: 设置Python环境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    
+    - name: 安装依赖
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: 创建数据目录
+      run: mkdir -p data
+    
+    - name: 运行采集程序
+      run: python main.py
+      env:
+        SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+        SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+        SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+        RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+    
+    - name: 上传日志和简报
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: collector-output
+        path: data/
+        retention-days: 7
