@@ -1,5 +1,5 @@
 """
-新闻采集器模块
+新闻采集器模块 (最终优化版：基于主体+行为+结果组合过滤)
 """
 
 import os
@@ -20,6 +20,9 @@ from .keywords import (
     get_all_keywords,
     get_include_words,
     get_exclude_words,
+    get_subject_words,
+    get_action_words,
+    get_result_words,
     HIGH_PRIORITY_KEYWORDS,
     MEDIUM_PRIORITY_KEYWORDS,
     LOW_PRIORITY_KEYWORDS,
@@ -226,8 +229,13 @@ class NewsCollector:
         self.history: Set[str] = set()
         self._load_history()
         self.errors: List[str] = []
-        self.include_words = get_include_words()
+        
+        # 加载基于主体、行为、结果的新词库
         self.exclude_words = get_exclude_words()
+        self.subject_words = get_subject_words()
+        self.action_words = get_action_words()
+        self.result_words = get_result_words()
+        
         self.platforms = get_all_platforms()
 
     def _load_history(self):
@@ -276,16 +284,45 @@ class NewsCollector:
         return None
 
     def _is_relevant(self, title: str, summary: str) -> bool:
-        """检查内容是否与三资监管相关（包含关键词）"""
+        """基于 主体+行为/结果 的严格组合过滤"""
         content = f"{title}{summary}"
-        # 先过滤排除词
+        
+        # 1. 先过滤黑名单 (无用的干部处分和无关企业噪音)
         for word in self.exclude_words:
             if word in content:
                 return False
-        # 再匹配包含词
-        for word in self.include_words:
+        
+        # 2. 判断是否有主体词 (必须要有农村集体/三资等)
+        has_subject = False
+        for word in self.subject_words:
             if word in content:
-                return True
+                has_subject = True
+                break
+        if not has_subject:
+            return False
+
+        # 3. 判断是否有结果词 (追回、清退、返还、挽回... 这是最核心的)
+        has_result = False
+        for word in self.result_words:
+            if word in content:
+                has_result = True
+                break
+        
+        # 4. 方案A：只要满足 "主体 + 结果" 就直接通过 (强关联)
+        if has_subject and has_result:
+            return True
+            
+        # 5. 方案B：如果不满足直接结果词，必须满足 "主体 + 行为"
+        has_action = False
+        for word in self.action_words:
+            if word in content:
+                has_action = True
+                break
+        
+        if has_subject and has_action:
+            return True
+
+        # 6. 都不满足则丢弃
         return False
 
     def _is_recent(self, publish_time: str) -> bool:
@@ -301,20 +338,18 @@ class NewsCollector:
             return True
 
     def _fetch_page(self, url: str) -> Optional[str]:
-        """获取页面HTML (优化版：成功时不等待，失败才等待重试)"""
+        """获取页面HTML (成功时不等待，失败才等待重试)"""
         for attempt in range(self.config.max_retries):
             try:
                 response = self.session.get(url, timeout=(5, self.config.request_timeout))
-                # 自动检测编码
                 if response.encoding is None or response.encoding == 'ISO-8859-1':
-                    # 优先从 Content-Type 和 HTML meta 推断
                     response.encoding = response.apparent_encoding or 'utf-8'
                 if response.status_code == 200:
                     return response.text
-                time.sleep(1) # 状态码不对，短暂休息后重试
+                time.sleep(1)
             except Exception as e:
                 logger.debug(f"获取页面失败 {url}: {e}")
-                time.sleep(1) # 发生异常才 Sleep 等重试
+                time.sleep(1)
         return None
 
     def _scrape_list_page(self, platform: str, platform_config: dict) -> List[Dict]:
@@ -333,10 +368,9 @@ class NewsCollector:
                 continue
 
             try:
-                # 【优化点】：使用纯 Python 解析器，规避 Linux 环境可能存在的解析器依赖卡顿问题
+                # 强制使用 html.parser 避免环境依赖卡顿
                 soup = BeautifulSoup(html, 'html.parser')
 
-                # 尝试多种选择器查找列表项
                 selectors = [
                     platform_config.get('list_selector', ''),
                     'ul li a[href*=".html"]',
@@ -346,7 +380,7 @@ class NewsCollector:
                     '.news-list li',
                     '.list li',
                 ]
-                selectors = [s for s in selectors if s]  # 去空
+                selectors = [s for s in selectors if s]
 
                 list_items = []
                 selector_used = None
@@ -358,7 +392,6 @@ class NewsCollector:
                         break
 
                 if not list_items:
-                    # 兜底：提取所有包含链接的li
                     for li in soup.find_all('li'):
                         if li.find('a', href=True):
                             list_items.append(li)
@@ -372,8 +405,6 @@ class NewsCollector:
                         break
 
                     try:
-                        # 提取标题和链接
-                        # 如果匹配到的就是 <a> 本身，直接用它
                         if item.name == 'a' and item.get('href'):
                             title_elem = item
                         else:
@@ -384,7 +415,6 @@ class NewsCollector:
                             continue
 
                         title = title_elem.get_text(strip=True)
-                        # 跳过过短或无意义的标题
                         if len(title) < 5 or re.match(r'^\d+$', title):
                             continue
 
@@ -398,18 +428,15 @@ class NewsCollector:
                         if not fixed_link.startswith(('http://', 'https://')):
                             continue
 
-                        # 提取时间
                         time_elem = item.select_one(platform_config.get('time_selector', '.time, .date'))
                         if not time_elem:
                             time_elem = item.find(class_=re.compile(r'time|date|pub'))
                         time_text = time_elem.get_text(strip=True) if time_elem else ''
                         publish_time = self._extract_time(time_text) or ''
 
-                        # 时效性过滤
                         if not self._is_recent(publish_time):
                             continue
 
-                        # 提取摘要
                         desc_elem = item.select_one(platform_config.get('desc_selector', '.desc, .summary'))
                         if not desc_elem:
                             desc_elem = item.find(class_=re.compile(r'desc|summary|abstract|txt'))
@@ -436,40 +463,34 @@ class NewsCollector:
         return results
 
     def _scrape_platform(self, platform: str) -> List[Dict]:
-        """抓取单个平台的所有新闻条目（不经过关键词过滤）"""
         platform_config = self.platforms.get(platform)
         if not platform_config:
             return []
         return self._scrape_list_page(platform, platform_config)
 
     def _scrape_all_platforms(self) -> List[NewsItem]:
-        """并发抓取所有平台 (优化版：防止Action卡死转圈)"""
+        """并发抓取所有平台 (带超时防卡死)"""
         all_results = []
         seen_ids = set()
 
-        # 只抓取有 list_urls 的平台
         active_platforms = {
             name: cfg for name, cfg in self.platforms.items()
             if cfg.get('list_urls')
         }
 
-        # 控制最大并发数为 4 (减少极端情况下Action内存或网络带宽被打满的几率)
         with ThreadPoolExecutor(max_workers=min(4, len(active_platforms))) as executor:
             future_to_platform = {
                 executor.submit(self._scrape_platform, platform): platform
                 for platform in active_platforms
             }
 
-            # 循环等待任务完成，一有任务完成就立刻处理，不等待其他慢任务
             while future_to_platform:
-                # wait 设置超时 10 秒，防止某个线程死锁导致Action卡死
                 done, _ = wait(
                     future_to_platform, 
                     timeout=10, 
                     return_when=FIRST_COMPLETED
                 )
                 
-                # 如果 wait 超时返回空，说明有线程卡住了，我们强制跳出循环
                 if not done:
                     logger.warning("⚠️ 部分平台采集超时，跳过等待继续执行...")
                     break
@@ -477,7 +498,7 @@ class NewsCollector:
                 for future in done:
                     platform = future_to_platform.pop(future)
                     try:
-                        results = future.result(timeout=5) # result设置超时防止意外阻塞
+                        results = future.result(timeout=5)
                         if not results:
                             continue
                             
@@ -500,13 +521,11 @@ class NewsCollector:
                             )
                             all_results.append(news_item)
                     except Exception as e:
-                        # 捕获所有并发异常，绝不报错退出，只打印日志
                         logger.debug(f"处理 {platform} 结果失败 (不影响整体): {e}")
 
         return all_results
 
     def _web_search_fallback(self, query: str) -> List[Dict]:
-        """备用方案：通过搜索引擎搜索关键词"""
         results = []
         search_urls = [
             f"https://www.baidu.com/s?wd={quote(query)}&tn=news",
@@ -521,7 +540,6 @@ class NewsCollector:
             try:
                 soup = BeautifulSoup(html, 'html.parser')
 
-                # 尝试从搜索结果中提取
                 if 'baidu.com' in search_url:
                     items = soup.select('.result, .c-result, .news-content, .c-container')
                     for item in items[:self.config.max_articles_per_source]:
@@ -530,7 +548,6 @@ class NewsCollector:
                             continue
                         title = title_elem.get_text(strip=True)
                         raw_link = title_elem.get('href', '')
-                        # 百度会包装链接，需要提取真实URL
                         if 'http' not in raw_link:
                             continue
                         summary_elem = item.select_one('.c-abstract, .c-span-last, .news-desc')
@@ -570,7 +587,7 @@ class NewsCollector:
                 continue
 
             if results:
-                break  # 有一个搜索引擎出结果就停止
+                break
 
         return results
 
@@ -583,8 +600,8 @@ class NewsCollector:
         raw_news = self._scrape_all_platforms()
         logger.info(f"抓取到 {len(raw_news)} 条原始新闻")
 
-        # 关键词过滤：使用 _is_relevant（匹配任意一个包含词即可）
-        strategy_used = "关键词过滤"
+        # 关键词过滤：使用基于主体、行为、结果的严格组合逻辑
+        strategy_used = "组合过滤(主体+行为/结果)"
         matched_news = []
         seen_ids = set()
         for news in raw_news:
@@ -594,12 +611,12 @@ class NewsCollector:
                 matched_news.append(news)
                 seen_ids.add(news.id)
 
-        logger.info(f">>> 关键词过滤: {len(raw_news)} → {len(matched_news)} 条")
+        logger.info(f">>> 组合过滤: {len(raw_news)} → {len(matched_news)} 条")
 
-        # 如果关键词过滤命中太少，启用搜索引擎备用方案获取更精准的结果
+        # 如果关键词过滤命中太少，启用搜索引擎备用方案
         if len(matched_news) < self.config.min_news_threshold:
-            logger.warning(f"⚠️ 关键词过滤仅命中 {len(matched_news)} 条，启动搜索引擎备用方案")
-            fallback_queries = ["农村集体三资监管 通报", "农村集体资产 蝇贪蚁腐", "三资 微腐败 整治"]
+            logger.warning(f"⚠️ 组合过滤仅命中 {len(matched_news)} 条，启动搜索引擎备用方案")
+            fallback_queries = ["农村集体三资监管 追回资金", "农村集体资产 挪用 追回", "三资 微腐败 清退"]
 
             fb_news = []
             for query in fallback_queries:
@@ -608,8 +625,7 @@ class NewsCollector:
                 if fb_results:
                     logger.info(f"  搜索引擎返回 {len(fb_results)} 条结果")
                     for r in fb_results:
-                        # 搜索引擎的结果直接就是相关的，但也要过一下关键词
-                        content = f"{r['title']} {r.get('summary', '')}"
+                        # 搜索结果也要走严格的组合过滤
                         if self._is_relevant(r['title'], r.get('summary', '')):
                             item = NewsItem(
                                 title=r['title'],
@@ -631,9 +647,8 @@ class NewsCollector:
             if fb_news:
                 logger.info(f"搜索引擎备用方案获取 {len(fb_news)} 条")
                 matched_news = fb_news
-                strategy_used = "搜索引擎"
+                strategy_used = "搜索引擎 + 组合过滤"
             elif not matched_news:
-                # 真的什么都没有，保留原始抓取结果（但会标记）
                 logger.warning("⚠️ 所有方案均未命中，保留原始抓取结果")
                 matched_news = raw_news
                 strategy_used = "全部保留(未过滤)"
@@ -642,11 +657,9 @@ class NewsCollector:
         valid_news = [n for n in matched_news if n.url and n.url.startswith(('http://', 'https://'))]
         valid_news.sort(key=lambda x: (x.priority, x.publish_time), reverse=False)
 
-        # 限制数量
         if len(valid_news) > self.config.max_brief_items:
             valid_news = valid_news[:self.config.max_brief_items]
 
-        # 更新历史
         for news in valid_news:
             self.history.add(news.id)
         self._save_history()
