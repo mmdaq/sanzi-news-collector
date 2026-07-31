@@ -12,16 +12,9 @@ permissions:
 jobs:
   collect-and-send:
     runs-on: ubuntu-latest
-    # 【核心修复 1】：添加邮件发送容错，如果邮件发不出，整个 Action 也算成功（避免清空数据导致流程失败）
+    # 核心优化：为整个任务设置 10 分钟硬性超时限制，防止因网络卡死导致永远转圈
+    timeout-minutes: 10
     continue-on-error: true
-    
-    # 【核心修复 2】：将环境变量提升到 Step 级别，确保 Python 能正确通过 os.getenv() 读取
-    env:
-      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-      SMTP_PORT: ${{ secrets.SMTP_PORT }}
-      SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
-      SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
-      RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
     
     steps:
     - name: 检出代码
@@ -40,9 +33,14 @@ jobs:
     - name: 创建数据目录
       run: mkdir -p data
     
-    # 【核心修复 3】：删除了原来这里的 env 块，因为已经在上面定义了
     - name: 运行采集程序
       run: python main.py
+      env:
+        SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+        SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+        SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+        RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
     
     - name: 上传日志和简报
       if: always()
