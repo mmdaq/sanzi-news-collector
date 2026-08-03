@@ -1,5 +1,5 @@
 """
-新闻采集器模块 (最终优化版：基于主体+行为+结果组合过滤)
+新闻采集器模块 (最终版：优先官网，0条则搜索引擎兜底)
 """
 
 import os
@@ -23,10 +23,6 @@ from .keywords import (
     get_subject_words,
     get_action_words,
     get_result_words,
-    HIGH_PRIORITY_KEYWORDS,
-    MEDIUM_PRIORITY_KEYWORDS,
-    LOW_PRIORITY_KEYWORDS,
-    FALLBACK_KEYWORDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,7 +211,7 @@ class NewsItem:
 
 
 # ============================================================
-# 新闻采集器 — 直接抓取新闻列表页 + 关键词过滤
+# 新闻采集器
 # ============================================================
 class NewsCollector:
     def __init__(self, config: Config):
@@ -230,7 +226,6 @@ class NewsCollector:
         self._load_history()
         self.errors: List[str] = []
         
-        # 加载基于主体、行为、结果的新词库
         self.exclude_words = get_exclude_words()
         self.subject_words = get_subject_words()
         self.action_words = get_action_words()
@@ -284,15 +279,13 @@ class NewsCollector:
         return None
 
     def _is_relevant(self, title: str, summary: str) -> bool:
-        """基于 主体+行为/结果 的严格组合过滤"""
+        """严格组合过滤：必须有主体词，且有结果词或行为词"""
         content = f"{title}{summary}"
         
-        # 1. 先过滤黑名单 (无用的干部处分和无关企业噪音)
         for word in self.exclude_words:
             if word in content:
                 return False
         
-        # 2. 判断是否有主体词 (必须要有农村集体/三资等)
         has_subject = False
         for word in self.subject_words:
             if word in content:
@@ -301,18 +294,15 @@ class NewsCollector:
         if not has_subject:
             return False
 
-        # 3. 判断是否有结果词 (追回、清退、返还、挽回... 这是最核心的)
         has_result = False
         for word in self.result_words:
             if word in content:
                 has_result = True
                 break
         
-        # 4. 方案A：只要满足 "主体 + 结果" 就直接通过 (强关联)
         if has_subject and has_result:
             return True
             
-        # 5. 方案B：如果不满足直接结果词，必须满足 "主体 + 行为"
         has_action = False
         for word in self.action_words:
             if word in content:
@@ -322,11 +312,9 @@ class NewsCollector:
         if has_subject and has_action:
             return True
 
-        # 6. 都不满足则丢弃
         return False
 
     def _is_recent(self, publish_time: str) -> bool:
-        """检查是否在指定天数内"""
         if not publish_time:
             return True
         try:
@@ -338,7 +326,6 @@ class NewsCollector:
             return True
 
     def _fetch_page(self, url: str) -> Optional[str]:
-        """获取页面HTML (成功时不等待，失败才等待重试)"""
         for attempt in range(self.config.max_retries):
             try:
                 response = self.session.get(url, timeout=(5, self.config.request_timeout))
@@ -353,10 +340,8 @@ class NewsCollector:
         return None
 
     def _scrape_list_page(self, platform: str, platform_config: dict) -> List[Dict]:
-        """抓取某个平台的新闻列表页，提取所有文章条目"""
         results = []
         list_urls = platform_config.get('list_urls', [])
-
         if not list_urls:
             return results
 
@@ -368,42 +353,31 @@ class NewsCollector:
                 continue
 
             try:
-                # 强制使用 html.parser 避免环境依赖卡顿
                 soup = BeautifulSoup(html, 'html.parser')
-
                 selectors = [
                     platform_config.get('list_selector', ''),
-                    'ul li a[href*=".html"]',
-                    'ul li a[href*=".shtml"]',
-                    'ul li a[href*="/2025"]',
-                    'ul li a[href*="/2026"]',
-                    '.news-list li',
-                    '.list li',
+                    'ul li a[href*=".html"]', 'ul li a[href*=".shtml"]',
+                    'ul li a[href*="/2025"]', 'ul li a[href*="/2026"]',
+                    '.news-list li', '.list li',
                 ]
                 selectors = [s for s in selectors if s]
-
                 list_items = []
-                selector_used = None
                 for selector in selectors:
                     items = soup.select(selector)
                     if items:
                         list_items = items
-                        selector_used = selector
                         break
-
                 if not list_items:
                     for li in soup.find_all('li'):
                         if li.find('a', href=True):
                             list_items.append(li)
-                    selector_used = "li > a[href]"
 
-                logger.info(f"  [{platform}] 选择器 '{selector_used}' → {len(list_items)} 个候选")
+                logger.info(f"  [{platform}] 选择器 → {len(list_items)} 个候选")
 
                 count = 0
                 for item in list_items:
                     if count >= self.config.max_articles_per_source:
                         break
-
                     try:
                         if item.name == 'a' and item.get('href'):
                             title_elem = item
@@ -411,22 +385,17 @@ class NewsCollector:
                             title_elem = item.select_one(platform_config.get('title_selector', 'a'))
                             if not title_elem:
                                 title_elem = item.find('a')
-                        if not title_elem:
-                            continue
+                        if not title_elem: continue
 
                         title = title_elem.get_text(strip=True)
-                        if len(title) < 5 or re.match(r'^\d+$', title):
-                            continue
+                        if len(title) < 5 or re.match(r'^\d+$', title): continue
 
                         raw_link = title_elem.get('href', '')
-                        if not raw_link:
-                            continue
+                        if not raw_link: continue
 
                         base_url = platform_config.get('base_url', '')
                         fixed_link = fix_url(raw_link, base_url)
-
-                        if not fixed_link.startswith(('http://', 'https://')):
-                            continue
+                        if not fixed_link.startswith(('http://', 'https://')): continue
 
                         time_elem = item.select_one(platform_config.get('time_selector', '.time, .date'))
                         if not time_elem:
@@ -434,8 +403,7 @@ class NewsCollector:
                         time_text = time_elem.get_text(strip=True) if time_elem else ''
                         publish_time = self._extract_time(time_text) or ''
 
-                        if not self._is_recent(publish_time):
-                            continue
+                        if not self._is_recent(publish_time): continue
 
                         desc_elem = item.select_one(platform_config.get('desc_selector', '.desc, .summary'))
                         if not desc_elem:
@@ -452,62 +420,43 @@ class NewsCollector:
                             'priority': platform_config.get('priority', 99),
                         })
                         count += 1
-
                     except Exception:
                         continue
-
             except Exception as e:
                 logger.error(f"解析列表页失败 {platform}: {e}")
                 self.errors.append(f"解析列表页失败 {platform}: {str(e)}")
-
         return results
 
     def _scrape_platform(self, platform: str) -> List[Dict]:
         platform_config = self.platforms.get(platform)
-        if not platform_config:
-            return []
+        if not platform_config: return []
         return self._scrape_list_page(platform, platform_config)
 
     def _scrape_all_platforms(self) -> List[NewsItem]:
-        """并发抓取所有平台 (带超时防卡死)"""
         all_results = []
         seen_ids = set()
-
         active_platforms = {
-            name: cfg for name, cfg in self.platforms.items()
-            if cfg.get('list_urls')
+            name: cfg for name, cfg in self.platforms.items() if cfg.get('list_urls')
         }
-
         with ThreadPoolExecutor(max_workers=min(4, len(active_platforms))) as executor:
             future_to_platform = {
                 executor.submit(self._scrape_platform, platform): platform
                 for platform in active_platforms
             }
-
             while future_to_platform:
-                done, _ = wait(
-                    future_to_platform, 
-                    timeout=10, 
-                    return_when=FIRST_COMPLETED
-                )
-                
+                done, _ = wait(future_to_platform, timeout=10, return_when=FIRST_COMPLETED)
                 if not done:
                     logger.warning("⚠️ 部分平台采集超时，跳过等待继续执行...")
                     break
-
                 for future in done:
                     platform = future_to_platform.pop(future)
                     try:
                         results = future.result(timeout=5)
-                        if not results:
-                            continue
-                            
+                        if not results: continue
                         for result in results:
                             item_id = NewsItem._generate_id(result['title'], result['url'])
-                            if item_id in self.history or item_id in seen_ids:
-                                continue
+                            if item_id in self.history or item_id in seen_ids: continue
                             seen_ids.add(item_id)
-
                             news_item = NewsItem(
                                 title=result['title'],
                                 url=result['url'],
@@ -522,73 +471,66 @@ class NewsCollector:
                             all_results.append(news_item)
                     except Exception as e:
                         logger.debug(f"处理 {platform} 结果失败 (不影响整体): {e}")
-
         return all_results
 
     def _web_search_fallback(self, query: str) -> List[Dict]:
+        """备用方案：仅当官网0条时启用，强制按时间搜索"""
         results = []
+        # 【搜索 URL】：强制百度按时间倒序 (gpc=stf)，必应按日期 (sort=date)
         search_urls = [
-            f"https://www.baidu.com/s?wd={quote(query)}&tn=news",
-            f"https://www.bing.com/news/search?q={quote(query)}&setlang=zh-Hans",
+            f"https://www.baidu.com/s?wd={quote(query)}&tn=news&gpc=stf&gpc_plus=1",
+            f"https://www.bing.com/news/search?q={quote(query)}&setlang=zh-Hans&sort=date",
         ]
-
         for search_url in search_urls:
             html = self._fetch_page(search_url)
-            if not html:
-                continue
-
+            if not html: continue
             try:
                 soup = BeautifulSoup(html, 'html.parser')
-
                 if 'baidu.com' in search_url:
                     items = soup.select('.result, .c-result, .news-content, .c-container')
-                    for item in items[:self.config.max_articles_per_source]:
+                    for item in items[:self.config.max_articles_per_source * 2]:
                         title_elem = item.select_one('h3 a, .c-title a, .news-title a, a')
-                        if not title_elem:
-                            continue
+                        if not title_elem: continue
                         title = title_elem.get_text(strip=True)
                         raw_link = title_elem.get('href', '')
-                        if 'http' not in raw_link:
-                            continue
+                        if 'http' not in raw_link: continue
                         summary_elem = item.select_one('.c-abstract, .c-span-last, .news-desc')
                         summary = summary_elem.get_text(strip=True) if summary_elem else ''
+                        publish_time = ''
+                        time_elem = item.select_one('.c-time, .news-date, .source-time, .c-gray')
+                        if time_elem:
+                            extracted_date = self._extract_time(time_elem.get_text(strip=True))
+                            if extracted_date: publish_time = extracted_date
                         results.append({
-                            'title': title,
-                            'url': raw_link,
-                            'original_url': raw_link,
-                            'publish_time': '',
-                            'summary': summary[:300],
-                            'source': f'搜索引擎-{query}',
-                            'priority': 10,
+                            'title': title, 'url': raw_link, 'original_url': raw_link,
+                            'publish_time': publish_time, 'summary': summary[:300],
+                            'source': f'搜索引擎-{query}', 'priority': 10,
                         })
                 elif 'bing.com' in search_url:
                     items = soup.select('.news-card, .card, .topic-card')
-                    for item in items[:self.config.max_articles_per_source]:
+                    for item in items[:self.config.max_articles_per_source * 2]:
                         title_elem = item.select_one('a.title, a[href]')
-                        if not title_elem:
-                            continue
+                        if not title_elem: continue
                         title = title_elem.get_text(strip=True)
                         raw_link = title_elem.get('href', '')
-                        if 'http' not in raw_link:
-                            continue
+                        if 'http' not in raw_link: continue
                         summary_elem = item.select_one('.snippet, .description')
                         summary = summary_elem.get_text(strip=True) if summary_elem else ''
+                        publish_time = ''
+                        time_elem = item.select_one('.date, .time, .source-date')
+                        if time_elem:
+                            extracted_date = self._extract_time(time_elem.get_text(strip=True))
+                            if extracted_date: publish_time = extracted_date
                         results.append({
-                            'title': title,
-                            'url': fix_url(raw_link),
-                            'original_url': raw_link,
-                            'publish_time': '',
-                            'summary': summary[:300],
-                            'source': f'搜索引擎-{query}',
-                            'priority': 10,
+                            'title': title, 'url': fix_url(raw_link), 'original_url': raw_link,
+                            'publish_time': publish_time, 'summary': summary[:300],
+                            'source': f'搜索引擎-{query}', 'priority': 10,
                         })
             except Exception as e:
                 logger.debug(f"搜索引擎解析失败 {search_url}: {e}")
                 continue
-
             if results:
                 break
-
         return results
 
     def collect(self) -> List[NewsItem]:
@@ -596,67 +538,58 @@ class NewsCollector:
         logger.info(f"开始采集 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 60)
 
-        logger.info(">>> 步骤1: 抓取所有平台新闻列表页")
+        # ========================================================
+        # 第一步：优先从官方平台列表页抓取
+        # ========================================================
+        logger.info(">>> 步骤1: 优先抓取官方平台新闻列表页")
         raw_news = self._scrape_all_platforms()
-        logger.info(f"抓取到 {len(raw_news)} 条原始新闻")
+        logger.info(f"抓取到 {len(raw_news)} 条候选新闻")
 
-        # 关键词过滤：使用基于主体、行为、结果的严格组合逻辑
-        strategy_used = "组合过滤(主体+行为/结果)"
-        matched_news = []
+        valid_news = []
         seen_ids = set()
         for news in raw_news:
-            if news.id in seen_ids:
-                continue
+            if news.id in seen_ids: continue
             if self._is_relevant(news.title, news.summary):
-                matched_news.append(news)
+                valid_news.append(news)
                 seen_ids.add(news.id)
+        
+        valid_news.sort(key=lambda x: (x.priority, x.publish_time), reverse=False)
+        logger.info(f">>> 官方来源匹配: {len(raw_news)} → {len(valid_news)} 条有效新闻")
 
-        logger.info(f">>> 组合过滤: {len(raw_news)} → {len(matched_news)} 条")
-
-        # 如果关键词过滤命中太少，启用搜索引擎备用方案
-        if len(matched_news) < self.config.min_news_threshold:
-            logger.warning(f"⚠️ 组合过滤仅命中 {len(matched_news)} 条，启动搜索引擎备用方案")
+        # ========================================================
+        # 第二步：如果官方来源一条都没拿到，再启动搜索引擎
+        # ========================================================
+        if len(valid_news) == 0:
+            logger.warning("⚠️ 官方网站未采集到新闻，启动搜索引擎备用方案...")
             fallback_queries = ["农村集体三资监管 追回资金", "农村集体资产 挪用 追回", "三资 微腐败 清退"]
-
-            fb_news = []
+            
             for query in fallback_queries:
                 logger.info(f">>> 备用搜索: {query}")
                 fb_results = self._web_search_fallback(query)
                 if fb_results:
-                    logger.info(f"  搜索引擎返回 {len(fb_results)} 条结果")
+                    logger.info(f"  搜索引擎返回 {len(fb_results)} 条原始结果")
                     for r in fb_results:
-                        # 搜索结果也要走严格的组合过滤
                         if self._is_relevant(r['title'], r.get('summary', '')):
                             item = NewsItem(
-                                title=r['title'],
-                                url=r['url'],
-                                source=r['source'],
+                                title=r['title'], url=r['url'], source=r['source'],
                                 publish_time=r.get('publish_time', ''),
-                                summary=r.get('summary', ''),
-                                keywords=[],
-                                link_valid=True,
-                                priority=r.get('priority', 10),
+                                summary=r.get('summary', ''), keywords=[],
+                                link_valid=True, priority=r.get('priority', 10),
                                 original_url=r.get('original_url', '')
                             )
                             if item.id not in seen_ids:
-                                fb_news.append(item)
+                                valid_news.append(item)
                                 seen_ids.add(item.id)
-                    if fb_news:
+                    if valid_news:
                         break
+            
+            if valid_news:
+                logger.info(f"✅ 搜索引擎成功兜底 {len(valid_news)} 条有效新闻")
+                valid_news.sort(key=lambda x: (x.priority, x.publish_time), reverse=False)
 
-            if fb_news:
-                logger.info(f"搜索引擎备用方案获取 {len(fb_news)} 条")
-                matched_news = fb_news
-                strategy_used = "搜索引擎 + 组合过滤"
-            elif not matched_news:
-                logger.warning("⚠️ 所有方案均未命中，保留原始抓取结果")
-                matched_news = raw_news
-                strategy_used = "全部保留(未过滤)"
-
-        # 过滤并排序
-        valid_news = [n for n in matched_news if n.url and n.url.startswith(('http://', 'https://'))]
-        valid_news.sort(key=lambda x: (x.priority, x.publish_time), reverse=False)
-
+        # ========================================================
+        # 第三步：限制简报条数并保存历史
+        # ========================================================
         if len(valid_news) > self.config.max_brief_items:
             valid_news = valid_news[:self.config.max_brief_items]
 
@@ -665,9 +598,8 @@ class NewsCollector:
         self._save_history()
 
         logger.info("=" * 60)
-        logger.info(f"采集完成，共 {len(valid_news)} 条有效新闻 (策略: {strategy_used})")
+        logger.info(f"采集完成，共 {len(valid_news)} 条有效新闻")
         logger.info("=" * 60)
-
         return valid_news
 
     def get_errors(self) -> List[str]:
