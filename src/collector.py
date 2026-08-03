@@ -1,5 +1,5 @@
 """
-新闻采集器模块 (最终版：优先官网，0条则搜索引擎兜底)
+新闻采集器模块 (最终优化版：严格限制搜索引擎结果时效性)
 """
 
 import os
@@ -279,13 +279,20 @@ class NewsCollector:
         return None
 
     def _is_relevant(self, title: str, summary: str) -> bool:
-        """严格组合过滤：必须有主体词，且有结果词或行为词"""
+        """
+        宽松的语义匹配逻辑：
+        1. 内容中必须包含核心主体词（如：农村集体、三资、村集体）。
+        2. 内容中必须包含行为词或结果词（如：追回、整治、侵占）。
+        3. 配合排他词过滤掉纯粹的纪检干部落马新闻。
+        """
         content = f"{title}{summary}"
         
+        # 1. 先检查黑名单 (排除落马干部处分、无关广告等噪音)
         for word in self.exclude_words:
             if word in content:
                 return False
         
+        # 2. 必须有主体词 (农村集体、三资等)
         has_subject = False
         for word in self.subject_words:
             if word in content:
@@ -294,22 +301,14 @@ class NewsCollector:
         if not has_subject:
             return False
 
-        has_result = False
-        for word in self.result_words:
+        # 3. 必须有行为词 或者 结果词 (整治、侵占、追回、清退等)
+        has_action_or_result = False
+        for word in self.action_words + self.result_words:
             if word in content:
-                has_result = True
+                has_action_or_result = True
                 break
         
-        if has_subject and has_result:
-            return True
-            
-        has_action = False
-        for word in self.action_words:
-            if word in content:
-                has_action = True
-                break
-        
-        if has_subject and has_action:
+        if has_subject and has_action_or_result:
             return True
 
         return False
@@ -474,21 +473,30 @@ class NewsCollector:
         return all_results
 
     def _web_search_fallback(self, query: str) -> List[Dict]:
-        """备用方案：仅当官网0条时启用，强制按时间搜索"""
+        """
+        备用方案：通过搜索引擎搜索关键词。
+        强制按时间排序 + 在程序内存中剔除超过 7 天的旧闻。
+        """
         results = []
-        # 【搜索 URL】：强制百度按时间倒序 (gpc=stf)，必应按日期 (sort=date)
+        today = datetime.now().date()
+        week_ago_limit = today - timedelta(days=7)
+        
+        # 强制搜索引擎按时间排序
         search_urls = [
             f"https://www.baidu.com/s?wd={quote(query)}&tn=news&gpc=stf&gpc_plus=1",
             f"https://www.bing.com/news/search?q={quote(query)}&setlang=zh-Hans&sort=date",
         ]
+
         for search_url in search_urls:
             html = self._fetch_page(search_url)
             if not html: continue
             try:
                 soup = BeautifulSoup(html, 'html.parser')
+                
+                # 处理百度搜索结果
                 if 'baidu.com' in search_url:
                     items = soup.select('.result, .c-result, .news-content, .c-container')
-                    for item in items[:self.config.max_articles_per_source * 2]:
+                    for item in items[:self.config.max_articles_per_source * 3]:
                         title_elem = item.select_one('h3 a, .c-title a, .news-title a, a')
                         if not title_elem: continue
                         title = title_elem.get_text(strip=True)
@@ -496,19 +504,33 @@ class NewsCollector:
                         if 'http' not in raw_link: continue
                         summary_elem = item.select_one('.c-abstract, .c-span-last, .news-desc')
                         summary = summary_elem.get_text(strip=True) if summary_elem else ''
+                        
                         publish_time = ''
                         time_elem = item.select_one('.c-time, .news-date, .source-time, .c-gray')
                         if time_elem:
                             extracted_date = self._extract_time(time_elem.get_text(strip=True))
-                            if extracted_date: publish_time = extracted_date
+                            if extracted_date:
+                                publish_time = extracted_date
+                                # ================= 严格过滤旧闻 =================
+                                try:
+                                    pub_date = datetime.strptime(publish_time, '%Y-%m-%d').date()
+                                    # 超过 7 天前的文章，直接跳过，绝不收录
+                                    if pub_date < week_ago_limit:
+                                        continue 
+                                except:
+                                    pass
+                                # ============================================
+
                         results.append({
                             'title': title, 'url': raw_link, 'original_url': raw_link,
                             'publish_time': publish_time, 'summary': summary[:300],
                             'source': f'搜索引擎-{query}', 'priority': 10,
                         })
+                        
+                # 处理必应搜索结果
                 elif 'bing.com' in search_url:
                     items = soup.select('.news-card, .card, .topic-card')
-                    for item in items[:self.config.max_articles_per_source * 2]:
+                    for item in items[:self.config.max_articles_per_source * 3]:
                         title_elem = item.select_one('a.title, a[href]')
                         if not title_elem: continue
                         title = title_elem.get_text(strip=True)
@@ -516,11 +538,22 @@ class NewsCollector:
                         if 'http' not in raw_link: continue
                         summary_elem = item.select_one('.snippet, .description')
                         summary = summary_elem.get_text(strip=True) if summary_elem else ''
+                        
                         publish_time = ''
                         time_elem = item.select_one('.date, .time, .source-date')
                         if time_elem:
                             extracted_date = self._extract_time(time_elem.get_text(strip=True))
-                            if extracted_date: publish_time = extracted_date
+                            if extracted_date:
+                                publish_time = extracted_date
+                                # ================= 严格过滤旧闻 =================
+                                try:
+                                    pub_date = datetime.strptime(publish_time, '%Y-%m-%d').date()
+                                    if pub_date < week_ago_limit:
+                                        continue 
+                                except:
+                                    pass
+                                # ============================================
+
                         results.append({
                             'title': title, 'url': fix_url(raw_link), 'original_url': raw_link,
                             'publish_time': publish_time, 'summary': summary[:300],
