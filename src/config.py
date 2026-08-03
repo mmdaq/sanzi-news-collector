@@ -29,7 +29,7 @@ class Config:
     # ========== 简报配置 ==========
     brief_word_count: int = 100
     max_brief_items: int = 30
-    days_range: int = 7  # 【已修改】：放宽至7天，最大程度利用官网列表页，减少搜索引擎调用
+    days_range: int = 30  # 【核心修改】：放宽至 30 天，确保有足够的素材
     
     # ========== 数据存储 ==========
     data_dir: str = "./data"
