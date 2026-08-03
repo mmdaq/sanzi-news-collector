@@ -1,5 +1,5 @@
 """
-新闻采集器模块 (最终优化版：严格限制搜索引擎结果时效性)
+新闻采集器模块 (终极强化版：强行在代码层剔除搜索引擎返回的旧闻)
 """
 
 import os
@@ -475,7 +475,7 @@ class NewsCollector:
     def _web_search_fallback(self, query: str) -> List[Dict]:
         """
         备用方案：通过搜索引擎搜索关键词。
-        强制按时间排序 + 在程序内存中剔除超过 7 天的旧闻。
+        强时效性拦截：强制按时间排序，且一旦发现日期缺失或超过 7 天，直接丢弃。
         """
         results = []
         today = datetime.now().date()
@@ -493,7 +493,7 @@ class NewsCollector:
             try:
                 soup = BeautifulSoup(html, 'html.parser')
                 
-                # 处理百度搜索结果
+                # ================= 处理百度搜索结果 =================
                 if 'baidu.com' in search_url:
                     items = soup.select('.result, .c-result, .news-content, .c-container')
                     for item in items[:self.config.max_articles_per_source * 3]:
@@ -507,27 +507,33 @@ class NewsCollector:
                         
                         publish_time = ''
                         time_elem = item.select_one('.c-time, .news-date, .source-time, .c-gray')
+                        extracted_date = None
                         if time_elem:
+                            # 尝试提取真实日期 (格式如: 2025-03-25)
                             extracted_date = self._extract_time(time_elem.get_text(strip=True))
-                            if extracted_date:
-                                publish_time = extracted_date
-                                # ================= 严格过滤旧闻 =================
-                                try:
-                                    pub_date = datetime.strptime(publish_time, '%Y-%m-%d').date()
-                                    # 超过 7 天前的文章，直接跳过，绝不收录
-                                    if pub_date < week_ago_limit:
-                                        continue 
-                                except:
-                                    pass
-                                # ============================================
+                        
+                        # 【核心防护】：如果无法从结果页提取到年份日期，强制丢弃！
+                        # 百度经常把 2025 年旧闻排在前面，但不显示具体日期。
+                        if not extracted_date:
+                            continue 
+                        
+                        # 【核心防护】：提取到日期后，如果发现超过 7 天，强制丢弃！
+                        try:
+                            pub_date = datetime.strptime(extracted_date, '%Y-%m-%d').date()
+                            if pub_date < week_ago_limit:
+                                continue 
+                        except:
+                            continue # 日期解析错误也直接丢弃
 
+                        # 通过所有关卡，收录这篇新闻
+                        publish_time = extracted_date
                         results.append({
                             'title': title, 'url': raw_link, 'original_url': raw_link,
                             'publish_time': publish_time, 'summary': summary[:300],
                             'source': f'搜索引擎-{query}', 'priority': 10,
                         })
                         
-                # 处理必应搜索结果
+                # ================= 处理必应搜索结果 =================
                 elif 'bing.com' in search_url:
                     items = soup.select('.news-card, .card, .topic-card')
                     for item in items[:self.config.max_articles_per_source * 3]:
@@ -541,19 +547,22 @@ class NewsCollector:
                         
                         publish_time = ''
                         time_elem = item.select_one('.date, .time, .source-date')
+                        extracted_date = None
                         if time_elem:
                             extracted_date = self._extract_time(time_elem.get_text(strip=True))
-                            if extracted_date:
-                                publish_time = extracted_date
-                                # ================= 严格过滤旧闻 =================
-                                try:
-                                    pub_date = datetime.strptime(publish_time, '%Y-%m-%d').date()
-                                    if pub_date < week_ago_limit:
-                                        continue 
-                                except:
-                                    pass
-                                # ============================================
+                        
+                        # 【核心防护】：必应也一样，没有明确日期的直接视为旧闻丢弃
+                        if not extracted_date:
+                            continue
+                            
+                        try:
+                            pub_date = datetime.strptime(extracted_date, '%Y-%m-%d').date()
+                            if pub_date < week_ago_limit:
+                                continue 
+                        except:
+                            continue
 
+                        publish_time = extracted_date
                         results.append({
                             'title': title, 'url': fix_url(raw_link), 'original_url': raw_link,
                             'publish_time': publish_time, 'summary': summary[:300],
