@@ -479,7 +479,7 @@ class NewsCollector:
         """
         results = []
         today = datetime.now().date()
-        week_ago_limit = today - timedelta(days=7)
+        week_ago_limit = today - timedelta(days=30)
         
         # 强制搜索引擎按时间排序
         search_urls = [
