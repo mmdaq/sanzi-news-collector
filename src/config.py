@@ -18,18 +18,18 @@ class Config:
     receiver_email: str = os.getenv('RECEIVER_EMAIL', '')
     
     # ========== 采集配置 ==========
-    max_articles_per_source: int = 15
-    request_timeout: int = 20
-    request_delay: float = 1.5
-    max_workers: int = 2
-    max_retries: int = 3
-    link_verify_timeout: int = 5
+    max_articles_per_source: int = 10
+    request_timeout: int = 10
+    request_delay: float = 0.3
+    max_workers: int = 5
+    max_retries: int = 2
+    link_verify_timeout: int = 3
     min_news_threshold: int = 2
     
     # ========== 简报配置 ==========
     brief_word_count: int = 100
     max_brief_items: int = 30
-    days_range: int = 1  # 只采集当天和前1天的新闻
+    days_range: int = 7  # 【已修改】：放宽至7天，最大程度利用官网列表页，减少搜索引擎调用
     
     # ========== 数据存储 ==========
     data_dir: str = "./data"
