@@ -88,9 +88,9 @@ def get_action_words() -> list:
     return ACTION_WORDS.copy()
 
 def get_result_words() -> list:
-    # 将结果词与典型案件词汇合并，确保能被系统识别为“有效内容”
-    return (RESULT_WORDS := [ "追回", "清退", "返还", "挽回", "挽回损失", "收缴", "收回", "归还", "退回", 
-                              "补发", "赔偿", "赔付", "补偿", "发还" ])
+    # 将结果词与典型案件词汇合并
+    return [ "追回", "清退", "返还", "挽回", "挽回损失", "收缴", "收回", "归还", "退回", 
+             "补发", "赔偿", "赔付", "补偿", "发还" ]
 
 def get_exclude_words() -> list:
     return EXCLUDE_WORDS.copy()
@@ -98,3 +98,13 @@ def get_exclude_words() -> list:
 # 兼容老版本代码调用
 def get_include_words() -> list:
     return SUBJECT_WORDS.copy() + ACTION_WORDS.copy() + TYPICAL_WORDS.copy()
+
+# ============================================================
+# 【关键修复】：必须补上这个被漏掉的函数，否则 collector.py 会直接崩溃！
+# ============================================================
+def get_all_keywords() -> dict:
+    return {
+        'subject': SUBJECT_WORDS,
+        'action': ACTION_WORDS,
+        'result': get_result_words(),
+    }
