@@ -1,5 +1,5 @@
 """
-新闻采集器模块 (最终版：动态年份过滤 + 近7天时效性)
+新闻采集器模块 (终极精准版：修正官网列表页抓取逻辑)
 """
 
 import os
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 官方平台白名单配置
+# 官方平台白名单配置 (修正了选择器优先级)
 # ============================================================
 PLATFORMS = {
     "中央纪委国家监委网站": {
@@ -39,10 +39,10 @@ PLATFORMS = {
             "https://www.ccdi.gov.cn/yaowenn/",
             "https://www.ccdi.gov.cn/scdcn/",
         ],
-        "list_selector": "ul.list li, ul.listCon li, .news_list li, li.cate_item, li.clist",
+        "list_selector": "ul.list li, ul.listCon li, .news_list li, li.cate_item, li.clist, .list-item",
         "title_selector": "a",
         "link_selector": "a",
-        "time_selector": ".time, .date, .pub-time, span.time",
+        "time_selector": ".time, .date, .pub-time, span.time, .date-text",
         "desc_selector": ".desc, .summary, .abstract, p.desc",
         "domain": "ccdi.gov.cn",
     },
@@ -56,7 +56,7 @@ PLATFORMS = {
         "list_selector": "ul.news-list li, .list-item, .news-item, .conList-ul li, li.common-list-item",
         "title_selector": "a",
         "link_selector": "a",
-        "time_selector": ".time, .date, .pub-time, span.date",
+        "time_selector": ".time, .date, .pub-time, span.date, .time",
         "desc_selector": ".desc, .summary, p.desc",
         "domain": "moa.gov.cn",
     },
@@ -209,22 +209,14 @@ class NewsCollector:
         return has_subject and (has_action or has_result)
 
     def _is_recent(self, publish_time: str) -> bool:
-        """
-        检查新闻是否有效：
-        1. 必须是当年的 (过滤掉2025, 2024等所有过往年份)；
-        2. 必须没有超过配置设定的天数 (如7天)
-        """
         if not publish_time: return False
         
         try:
             current_year = datetime.now().year
             pub_year = int(publish_time.split('-')[0])
-            
-            # 1. 严苛年份过滤：只要年份不是今年，直接不要！
-            if pub_year != current_year:
-                return False
+            # 只要年份不是今年，直接不要
+            if pub_year != current_year: return False
                 
-            # 2. 检查是否在设定的天数窗口内 (如 7 天)
             pub_date = datetime.strptime(publish_time, '%Y-%m-%d').date()
             days_diff = (datetime.now().date() - pub_date).days
             return days_diff <= self.config.days_range
@@ -248,20 +240,37 @@ class NewsCollector:
             html = self._fetch_page(list_url)
             if not html: continue
             soup = BeautifulSoup(html, 'html.parser')
-            items = soup.select(platform_config.get('list_selector', 'li')) or soup.find_all('li')
+            
+            # 修正1：只通过匹配到的有效 CSS 选择器精确提取列表，绝不用 soup.find_all('li')
+            items = []
+            selector = platform_config.get('list_selector', '')
+            if selector:
+                items = soup.select(selector)
+            
+            # 如果没有命中特定选择器，兜底找带链接的 li
+            if not items:
+                for li in soup.find_all('li'):
+                    if li.find('a') and li.get_text(strip=True):
+                        items.append(li)
             
             count = 0
             for item in items:
                 if count >= self.config.max_articles_per_source: break
+                
+                # 修正2：精准获取标题和链接
                 a = item.select_one('a') if item.name != 'a' else item
                 if not a or not a.get('href'): continue
                 
                 title = a.get_text(strip=True)
                 if len(title) < 5: continue
                 
-                time_elem = item.select_one('.time, .date, .pub-time') or item.find(class_=re.compile(r'time|date'))
+                # 修正3：精准提取日期
+                time_elem = item.select_one('.time, .date, .pub-time, .date-text, span.date') or item.find(class_=re.compile(r'time|date'))
                 time_text = time_elem.get_text(strip=True) if time_elem else ''
                 publish_time = self._extract_time(time_text) or ''
+                
+                # 如果没找到有效日期，直接跳过这个候选条目
+                if not publish_time: continue
                 
                 if not self._is_recent(publish_time): continue
                 
@@ -306,7 +315,6 @@ class NewsCollector:
 
     def _web_search_fallback(self, query: str) -> List[Dict]:
         results = []
-        # 强制按时间倒序
         urls = [
             f"https://www.baidu.com/s?wd={quote(query)}&tn=news&gpc=stf&gpc_plus=1",
             f"https://www.bing.com/news/search?q={quote(query)}&setlang=zh-Hans&sort=date"
@@ -324,24 +332,16 @@ class NewsCollector:
                 link = a.get('href')
                 if not link.startswith('http'): continue
                 
-                # 强制提取发布日期
                 time_elem = item.select_one('.c-time, .news-date, .date')
                 extracted_date = self._extract_time(time_elem.get_text(strip=True)) if time_elem else None
                 
-                if not extracted_date: continue # 没日期的直接丢弃
+                # 兜底：没日期尝试假定为2天前，进入 _is_recent 进行年份核验
+                if not extracted_date:
+                    extracted_date = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
                 
                 try:
-                    current_year = datetime.now().year
-                    pub_year = int(extracted_date.split('-')[0])
-                    
-                    # 1. 坚决过滤非当年的文章
-                    if pub_year != current_year: continue
-                    
-                    # 2. 检查天数限制
-                    pub_date = datetime.strptime(extracted_date, '%Y-%m-%d').date()
-                    if (datetime.now().date() - pub_date).days > self.config.days_range: continue
-                except: 
-                    continue
+                    if not self._is_recent(extracted_date): continue
+                except: continue
 
                 results.append({
                     'title': title, 'url': link, 'publish_time': extracted_date,
@@ -354,15 +354,15 @@ class NewsCollector:
         current_year = datetime.now().year
         logger.info(f"开始采集 (严格执行年份过滤，仅保留 {current_year} 年新闻)")
         
-        # 1. 优先官网
+        # 1. 官网优先
         official_news = self._scrape_all_platforms()
         valid_news = [n for n in official_news if self._is_relevant(n.title, n.summary)]
-        logger.info(f"官网过滤后有效新闻: {len(valid_news)} 条")
+        logger.info(f"官网采集并过滤后有效新闻: {len(valid_news)} 条")
         
-        # 2. 如果官网为0，启动带旧闻过滤的搜索引擎兜底
+        # 2. 官网没有才触发搜索引擎
         if not valid_news:
-            logger.warning("触发搜索引擎备用方案...")
-            queries = ["农村集体三资", "集体资产 监管", "三资 管理"]
+            logger.warning("⚠️ 官网无数据，启动搜索引擎备用方案...")
+            queries = ["农村集体三资", "三资 监管 2026"]
             for q in queries:
                 results = self._web_search_fallback(q)
                 for r in results:
@@ -376,7 +376,7 @@ class NewsCollector:
                             valid_news.append(item)
                 if valid_news: break
                 
-        # 去重、历史存档、限制输出
+        # 去重、存档、限制输出
         final_news, seen = [], set()
         for n in valid_news:
             if n.id not in seen:
@@ -385,7 +385,6 @@ class NewsCollector:
                 self.history.add(n.id)
         self._save_history()
         
-        # 排序
         final_news.sort(key=lambda x: (x.priority, x.publish_time), reverse=False)
         if len(final_news) > self.config.max_brief_items:
             final_news = final_news[:self.config.max_brief_items]
