@@ -29,7 +29,7 @@ class Config:
     # ========== 简报配置 ==========
     brief_word_count: int = 100
     max_brief_items: int = 30
-    days_range: int = 30  # 【核心修改】：放宽至 30 天，确保有足够的素材
+    days_range: int = 7  # 7 天时效性窗口，保证不会收到太老的正常新闻
     
     # ========== 数据存储 ==========
     data_dir: str = "./data"
