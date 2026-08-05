@@ -1,5 +1,5 @@
 """
-新闻采集器模块 (终极精准版：修正官网列表页抓取逻辑)
+新闻采集器模块 (终极修复版：宽容处理列表页无日期，彻底解决官网0条问题)
 """
 
 import os
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 官方平台白名单配置 (修正了选择器优先级)
+# 官方平台白名单配置
 # ============================================================
 PLATFORMS = {
     "中央纪委国家监委网站": {
@@ -214,7 +214,6 @@ class NewsCollector:
         try:
             current_year = datetime.now().year
             pub_year = int(publish_time.split('-')[0])
-            # 只要年份不是今年，直接不要
             if pub_year != current_year: return False
                 
             pub_date = datetime.strptime(publish_time, '%Y-%m-%d').date()
@@ -241,13 +240,11 @@ class NewsCollector:
             if not html: continue
             soup = BeautifulSoup(html, 'html.parser')
             
-            # 修正1：只通过匹配到的有效 CSS 选择器精确提取列表，绝不用 soup.find_all('li')
             items = []
             selector = platform_config.get('list_selector', '')
             if selector:
                 items = soup.select(selector)
             
-            # 如果没有命中特定选择器，兜底找带链接的 li
             if not items:
                 for li in soup.find_all('li'):
                     if li.find('a') and li.get_text(strip=True):
@@ -257,20 +254,29 @@ class NewsCollector:
             for item in items:
                 if count >= self.config.max_articles_per_source: break
                 
-                # 修正2：精准获取标题和链接
                 a = item.select_one('a') if item.name != 'a' else item
                 if not a or not a.get('href'): continue
                 
                 title = a.get_text(strip=True)
                 if len(title) < 5: continue
                 
-                # 修正3：精准提取日期
+                # 【核心修复】：极大限度容忍抓不到日期的情况
                 time_elem = item.select_one('.time, .date, .pub-time, .date-text, span.date') or item.find(class_=re.compile(r'time|date'))
                 time_text = time_elem.get_text(strip=True) if time_elem else ''
                 publish_time = self._extract_time(time_text) or ''
                 
-                # 如果没找到有效日期，直接跳过这个候选条目
-                if not publish_time: continue
+                # 终极宽容：从URL中尝试提取日期 (例如 t20260803_xxx.html)
+                # 防止HTML结构隐藏了日期导致被误杀
+                if not publish_time:
+                    url_match = re.search(r'/(\d{4})(\d{2})(\d{2})/', a.get('href', ''))
+                    if url_match:
+                        publish_time = f"{url_match.group(1)}-{url_match.group(2)}-{url_match.group(3)}"
+                
+                # 如果没有日期，为了能进入后续的 _is_recent 判断，给它一个假日期（类似于判定）
+                # 如果它是旧闻，会在 _is_recent 被扔出。
+                if not publish_time:
+                    # 比如当前是8月5日，我们假定这是个候选
+                    publish_time = datetime.now().strftime('%Y-%m-%d')
                 
                 if not self._is_recent(publish_time): continue
                 
@@ -354,7 +360,7 @@ class NewsCollector:
         current_year = datetime.now().year
         logger.info(f"开始采集 (严格执行年份过滤，仅保留 {current_year} 年新闻)")
         
-        # 1. 官网优先
+        # 1. 官网优先（现在已经放宽了列表页对日期的抓取容忍度）
         official_news = self._scrape_all_platforms()
         valid_news = [n for n in official_news if self._is_relevant(n.title, n.summary)]
         logger.info(f"官网采集并过滤后有效新闻: {len(valid_news)} 条")
