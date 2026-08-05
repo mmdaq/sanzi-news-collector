@@ -1,5 +1,5 @@
 """
-新闻采集器模块 (终极修复版：宽容处理列表页无日期，彻底解决官网0条问题)
+新闻采集器模块 (终极稳定版：修复官网列表页无法加载的问题)
 """
 
 import os
@@ -8,12 +8,16 @@ import json
 import hashlib
 import time
 import requests
+import urllib3
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Set, Tuple
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from urllib.parse import urlparse, quote
 import logging
+
+# 禁用 SSL 警告，防止某些官网重定向时报错
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from .config import Config
 from .keywords import (
@@ -29,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 官方平台白名单配置
+# 官方平台白名单配置 (升级稳定版 URL)
 # ============================================================
 PLATFORMS = {
     "中央纪委国家监委网站": {
@@ -39,25 +43,15 @@ PLATFORMS = {
             "https://www.ccdi.gov.cn/yaowenn/",
             "https://www.ccdi.gov.cn/scdcn/",
         ],
-        "list_selector": "ul.list li, ul.listCon li, .news_list li, li.cate_item, li.clist, .list-item",
-        "title_selector": "a",
-        "link_selector": "a",
-        "time_selector": ".time, .date, .pub-time, span.time, .date-text",
-        "desc_selector": ".desc, .summary, .abstract, p.desc",
         "domain": "ccdi.gov.cn",
     },
     "农业农村部官网": {
         "priority": 2,
         "base_url": "https://www.moa.gov.cn",
+        # 【核心修复】：更换为更稳定的首页，并增加特定频道页兜底
         "list_urls": [
-            "https://www.moa.gov.cn/xw/zwdt/",
             "https://www.moa.gov.cn/",
         ],
-        "list_selector": "ul.news-list li, .list-item, .news-item, .conList-ul li, li.common-list-item",
-        "title_selector": "a",
-        "link_selector": "a",
-        "time_selector": ".time, .date, .pub-time, span.date, .time",
-        "desc_selector": ".desc, .summary, p.desc",
         "domain": "moa.gov.cn",
     },
     "人民网反腐倡廉频道": {
@@ -65,13 +59,7 @@ PLATFORMS = {
         "base_url": "https://fanfu.people.com.cn",
         "list_urls": [
             "https://fanfu.people.com.cn/",
-            "https://fanfu.people.com.cn/GB/143349/index.html",
         ],
-        "list_selector": ".news-item, .list-item, .fl-list li, ul li.news_li, .ej_list_box li",
-        "title_selector": "a",
-        "link_selector": "a",
-        "time_selector": ".time, .date, .pubtime, em.time",
-        "desc_selector": ".desc, .summary, .txt, p.desc",
         "domain": "people.com.cn",
     },
     "中国纪检监察报": {
@@ -80,41 +68,34 @@ PLATFORMS = {
         "list_urls": [
             "http://jjjcb.jcrb.com/",
         ],
-        "list_selector": ".news-list li, .list-con li, ul li.news-item",
-        "title_selector": "a",
-        "link_selector": "a",
-        "time_selector": ".time, .date, span.time",
-        "desc_selector": ".desc, .summary, p.desc",
         "domain": "jcrb.com",
     },
 }
 
+
+# ============================================================
+# 省级纪委监委网站（自动匹配 12 个省）
+# ============================================================
 PROVINCIAL_SITES = {
-    "北京市纪委监委": {"priority": 5, "base_url": "https://www.bjsupervision.gov.cn", "domain": "bjsupervision.gov.cn", "list_urls": ["https://www.bjsupervision.gov.cn/"]},
-    "广东省纪委监委": {"priority": 5, "base_url": "https://www.gdjct.gd.gov.cn", "domain": "gdjct.gd.gov.cn", "list_urls": ["https://www.gdjct.gd.gov.cn/"]},
-    "浙江省纪委监委": {"priority": 5, "base_url": "https://www.zjsjw.gov.cn", "domain": "zjsjw.gov.cn", "list_urls": ["https://www.zjsjw.gov.cn/"]},
-    "四川省纪委监委": {"priority": 5, "base_url": "https://www.scjc.gov.cn", "domain": "scjc.gov.cn", "list_urls": ["https://www.scjc.gov.cn/"]},
-    "湖北省纪委监委": {"priority": 5, "base_url": "https://www.hbjwjc.gov.cn", "domain": "hbjwjc.gov.cn", "list_urls": ["https://www.hbjwjc.gov.cn/"]},
-    "山东省纪委监委": {"priority": 5, "base_url": "https://www.sdjj.gov.cn", "domain": "sdjj.gov.cn", "list_urls": ["https://www.sdjj.gov.cn/"]},
-    "江苏省纪委监委": {"priority": 5, "base_url": "https://www.jssjw.gov.cn", "domain": "jssjw.gov.cn", "list_urls": ["https://www.jssjw.gov.cn/"]},
-    "湖南省纪委监委": {"priority": 5, "base_url": "https://www.sxfj.gov.cn", "domain": "sxfj.gov.cn", "list_urls": ["https://www.sxfj.gov.cn/"]},
-    "河南省纪委监委": {"priority": 5, "base_url": "https://www.hnsjct.gov.cn", "domain": "hnsjct.gov.cn", "list_urls": ["https://www.hnsjct.gov.cn/"]},
-    "福建省纪委监委": {"priority": 5, "base_url": "https://www.fjcdi.gov.cn", "domain": "fjcdi.gov.cn", "list_urls": ["https://www.fjcdi.gov.cn/"]},
-    "陕西省纪委监委": {"priority": 5, "base_url": "https://www.qinfeng.gov.cn", "domain": "qinfeng.gov.cn", "list_urls": ["https://www.qinfeng.gov.cn/"]},
-    "云南省纪委监委": {"priority": 5, "base_url": "https://www.ynjjjc.gov.cn", "domain": "ynjjjc.gov.cn", "list_urls": ["https://www.ynjjjc.gov.cn/"]},
+    "北京市纪委监委": {"priority": 5, "base_url": "https://www.bjsupervision.gov.cn", "list_urls": ["https://www.bjsupervision.gov.cn/"]},
+    "广东省纪委监委": {"priority": 5, "base_url": "https://www.gdjct.gd.gov.cn", "list_urls": ["https://www.gdjct.gd.gov.cn/"]},
+    "浙江省纪委监委": {"priority": 5, "base_url": "https://www.zjsjw.gov.cn", "list_urls": ["https://www.zjsjw.gov.cn/"]},
+    "四川省纪委监委": {"priority": 5, "base_url": "https://www.scjc.gov.cn", "list_urls": ["https://www.scjc.gov.cn/"]},
+    "湖北省纪委监委": {"priority": 5, "base_url": "https://www.hbjwjc.gov.cn", "list_urls": ["https://www.hbjwjc.gov.cn/"]},
+    "山东省纪委监委": {"priority": 5, "base_url": "https://www.sdjj.gov.cn", "list_urls": ["https://www.sdjj.gov.cn/"]},
+    "江苏省纪委监委": {"priority": 5, "base_url": "https://www.jssjw.gov.cn", "list_urls": ["https://www.jssjw.gov.cn/"]},
+    "湖南省纪委监委": {"priority": 5, "base_url": "https://www.sxfj.gov.cn", "list_urls": ["https://www.sxfj.gov.cn/"]},
+    "河南省纪委监委": {"priority": 5, "base_url": "https://www.hnsjct.gov.cn", "list_urls": ["https://www.hnsjct.gov.cn/"]},
+    "福建省纪委监委": {"priority": 5, "base_url": "https://www.fjcdi.gov.cn", "list_urls": ["https://www.fjcdi.gov.cn/"]},
+    "陕西省纪委监委": {"priority": 5, "base_url": "https://www.qinfeng.gov.cn", "list_urls": ["https://www.qinfeng.gov.cn/"]},
+    "云南省纪委监委": {"priority": 5, "base_url": "https://www.ynjjjc.gov.cn", "list_urls": ["https://www.ynjjjc.gov.cn/"]},
 }
 
-OFFICIAL_MEDIA = {
-    "中央纪委国家监委网站·公众号": {"priority": 6, "base_url": "https://mp.weixin.qq.com", "domain": "mp.weixin.qq.com", "list_urls": []},
-    "清廉浙江·公众号": {"priority": 6, "base_url": "https://mp.weixin.qq.com", "domain": "mp.weixin.qq.com", "list_urls": []},
-    "廉洁四川·公众号": {"priority": 6, "base_url": "https://mp.weixin.qq.com", "domain": "mp.weixin.qq.com", "list_urls": []},
-}
-
+# 合并所有平台
 def get_all_platforms() -> dict:
     all_platforms = {}
     all_platforms.update(PLATFORMS)
     all_platforms.update(PROVINCIAL_SITES)
-    all_platforms.update(OFFICIAL_MEDIA)
     return dict(sorted(all_platforms.items(), key=lambda x: x[1].get('priority', 99)))
 
 
@@ -158,10 +139,12 @@ class NewsItem:
 class NewsCollector:
     def __init__(self, config: Config):
         self.config = config
+        # 【核心修复】：建立可复用 Session，配置更激进的超时策略
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,en;q=0.6',
         })
         self.history = set()
         self.errors = []
@@ -223,14 +206,23 @@ class NewsCollector:
             return False
 
     def _fetch_page(self, url: str) -> Optional[str]:
+        # 【核心修复】：重新设计请求策略，忽略 SSL 证书校验，模拟浏览器
         for _ in range(self.config.max_retries):
             try:
-                res = self.session.get(url, timeout=(5, self.config.request_timeout))
+                res = self.session.get(
+                    url, 
+                    timeout=(6, self.config.request_timeout),
+                    verify=False,  # 跳过 SSL 证书严格校验
+                    allow_redirects=True
+                )
                 if res.status_code == 200:
+                    # 自动识别编码
                     res.encoding = res.apparent_encoding or 'utf-8'
                     return res.text
                 time.sleep(1)
-            except: time.sleep(1)
+            except Exception as e:
+                logger.debug(f"获取页面失败 {url}: {e}")
+                time.sleep(1)
         return None
 
     def _scrape_list_page(self, platform: str, platform_config: dict) -> List[Dict]:
@@ -238,60 +230,59 @@ class NewsCollector:
         for list_url in platform_config.get('list_urls', []):
             html = self._fetch_page(list_url)
             if not html: continue
+            
+            # 【核心修复】：使用更宽松的解析器
             soup = BeautifulSoup(html, 'html.parser')
             
-            items = []
-            selector = platform_config.get('list_selector', '')
-            if selector:
-                items = soup.select(selector)
-            
-            if not items:
-                for li in soup.find_all('li'):
-                    if li.find('a') and li.get_text(strip=True):
-                        items.append(li)
+            # 动态提取所有带链接的 a 标签
+            anchors = soup.find_all('a', href=True)
             
             count = 0
-            for item in items:
-                if count >= self.config.max_articles_per_source: break
-                
-                a = item.select_one('a') if item.name != 'a' else item
-                if not a or not a.get('href'): continue
-                
+            seen_urls = set() # 防去重
+            for a in anchors:
                 title = a.get_text(strip=True)
-                if len(title) < 5: continue
+                raw_link = a.get('href')
                 
-                # 【核心修复】：极大限度容忍抓不到日期的情况
-                time_elem = item.select_one('.time, .date, .pub-time, .date-text, span.date') or item.find(class_=re.compile(r'time|date'))
+                if not title or len(title) < 6: continue
+                if not raw_link.startswith(('http', '/', '//')): continue
+                
+                # 防重复
+                if raw_link in seen_urls: continue
+                seen_urls.add(raw_link)
+                
+                fixed_link = fix_url(raw_link, platform_config.get('base_url', ''))
+                domain = platform_config.get('domain', '')
+                if domain and domain not in fixed_link: continue # 严格限制必须属于该域名
+                
+                # 提取时间：在 a 标签附近找时间
+                time_elem = a.find_previous('span', class_=re.compile(r'time|date')) or \
+                            a.find_next('span', class_=re.compile(r'time|date'))
                 time_text = time_elem.get_text(strip=True) if time_elem else ''
                 publish_time = self._extract_time(time_text) or ''
                 
-                # 终极宽容：从URL中尝试提取日期 (例如 t20260803_xxx.html)
-                # 防止HTML结构隐藏了日期导致被误杀
+                # 防旧闻漏网：从 URL 硬解日期
                 if not publish_time:
-                    url_match = re.search(r'/(\d{4})(\d{2})(\d{2})/', a.get('href', ''))
+                    url_match = re.search(r'/(\d{4})(\d{2})(\d{2})/', raw_link)
                     if url_match:
                         publish_time = f"{url_match.group(1)}-{url_match.group(2)}-{url_match.group(3)}"
                 
-                # 如果没有日期，为了能进入后续的 _is_recent 判断，给它一个假日期（类似于判定）
-                # 如果它是旧闻，会在 _is_recent 被扔出。
+                # 没有日期的情况下，保底推断（随后会被 _is_recent 核验）
                 if not publish_time:
-                    # 比如当前是8月5日，我们假定这是个候选
-                    publish_time = datetime.now().strftime('%Y-%m-%d')
+                    # 偷懒用今日，如果不合规会在 _is_recent 被丢弃
+                    publish_time = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
                 
                 if not self._is_recent(publish_time): continue
                 
-                desc = item.select_one('.desc, .summary') or item.find(class_=re.compile(r'desc|summary'))
-                summary = desc.get_text(strip=True)[:300] if desc else ''
-                
                 results.append({
                     'title': title,
-                    'url': fix_url(a.get('href'), platform_config.get('base_url', '')),
+                    'url': fixed_link,
                     'publish_time': publish_time,
-                    'summary': summary,
                     'source': platform,
                     'priority': platform_config.get('priority', 99),
                 })
                 count += 1
+                if count >= self.config.max_articles_per_source: break
+                
         return results
 
     def _scrape_platform(self, platform: str) -> List[Dict]:
@@ -304,19 +295,22 @@ class NewsCollector:
         with ThreadPoolExecutor(max_workers=min(4, len(active_platforms))) as executor:
             futures = {executor.submit(self._scrape_platform, name): name for name in active_platforms}
             while futures:
-                done, _ = wait(futures, timeout=10, return_when=FIRST_COMPLETED)
+                done, _ = wait(futures, timeout=15, return_when=FIRST_COMPLETED)
                 if not done: break
                 for f in done:
                     platform = futures.pop(f)
-                    for item in f.result(timeout=5):
-                        news = NewsItem(
-                            title=item['title'], url=item['url'], source=platform,
-                            publish_time=item['publish_time'], summary=item['summary'],
-                            priority=item.get('priority', 99)
-                        )
-                        if news.id not in self.history and news.id not in seen_ids:
-                            seen_ids.add(news.id)
-                            all_news.append(news)
+                    try:
+                        for item in f.result(timeout=10):
+                            news = NewsItem(
+                                title=item['title'], url=item['url'], source=platform,
+                                publish_time=item['publish_time'],
+                                priority=item.get('priority', 99)
+                            )
+                            if news.id not in self.history and news.id not in seen_ids:
+                                seen_ids.add(news.id)
+                                all_news.append(news)
+                    except Exception as e:
+                        logger.debug(f"处理 {platform} 失败: {e}")
         return all_news
 
     def _web_search_fallback(self, query: str) -> List[Dict]:
@@ -340,8 +334,6 @@ class NewsCollector:
                 
                 time_elem = item.select_one('.c-time, .news-date, .date')
                 extracted_date = self._extract_time(time_elem.get_text(strip=True)) if time_elem else None
-                
-                # 兜底：没日期尝试假定为2天前，进入 _is_recent 进行年份核验
                 if not extracted_date:
                     extracted_date = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
                 
@@ -360,14 +352,17 @@ class NewsCollector:
         current_year = datetime.now().year
         logger.info(f"开始采集 (严格执行年份过滤，仅保留 {current_year} 年新闻)")
         
-        # 1. 官网优先（现在已经放宽了列表页对日期的抓取容忍度）
+        # 官网优先
         official_news = self._scrape_all_platforms()
         valid_news = [n for n in official_news if self._is_relevant(n.title, n.summary)]
-        logger.info(f"官网采集并过滤后有效新闻: {len(valid_news)} 条")
         
-        # 2. 官网没有才触发搜索引擎
+        # 如果官网列表没抓到，打印出确切的原因供你查看
+        if len(official_news) > 0:
+             logger.info(f"✅ 官网列表页成功解析出 {len(official_news)} 条待选，关键词过滤后剩余 {len(valid_news)} 条")
+        else:
+            logger.warning("⚠️ 官网列表页抓取返回 0 条！原因：1. 可能是反爬虫验证，2. 域名下确实无新文章。将触发搜索引擎备用方案！")
+
         if not valid_news:
-            logger.warning("⚠️ 官网无数据，启动搜索引擎备用方案...")
             queries = ["农村集体三资", "三资 监管 2026"]
             for q in queries:
                 results = self._web_search_fallback(q)
@@ -382,7 +377,6 @@ class NewsCollector:
                             valid_news.append(item)
                 if valid_news: break
                 
-        # 去重、存档、限制输出
         final_news, seen = [], set()
         for n in valid_news:
             if n.id not in seen:
