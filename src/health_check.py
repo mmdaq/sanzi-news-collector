@@ -11,21 +11,23 @@ logger = logging.getLogger(__name__)
 
 class HealthChecker:
     def __init__(self):
-        self.status = {'healthy': True, 'warnings': [], 'errors': [], 'timestamp': datetime.now().isoformat()}
+        self.status = {
+            "healthy": True,
+            "warnings": [],
+            "errors": [],
+            "timestamp": datetime.now().isoformat(),
+        }
 
-    def check_collection(self, news_count: int, errors: List[str], threshold: int = 1) -> dict:
-        self.status['healthy'] = True
-        self.status['warnings'] = []
-        self.status['errors'] = []
-
+    def check_collection(self, news_count: int, errors: List[str]) -> dict:
+        self.status["healthy"] = True
+        self.status["warnings"] = []
+        self.status["errors"] = []
         if news_count == 0:
-            self.status['warnings'].append('⚠️ 未采集到任何新闻')
-            self.status['healthy'] = False
-
+            self.status["warnings"].append("⚠️ 未采集到任何新闻")
+            self.status["healthy"] = False
         if errors:
-            self.status['errors'] = errors[:5]
-            self.status['healthy'] = False
-
+            self.status["errors"] = errors[:5]
+            self.status["healthy"] = False
         return self.status
 
     def get_report(self, news_count: int, errors: List[str]) -> str:
@@ -41,6 +43,6 @@ class HealthChecker:
             f"检查时间: {status['timestamp']}",
             "=" * 50,
         ]
-        report = '\n'.join(lines)
+        report = "\n".join(lines)
         logger.info(report)
         return report
