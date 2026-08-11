@@ -12,27 +12,31 @@ permissions:
 jobs:
   collect-and-send:
     runs-on: ubuntu-latest
-    # 核心优化：为整个任务设置 10 分钟硬性超时限制，防止因网络卡死导致永远转圈
-    timeout-minutes: 10
+    timeout-minutes: 15
     continue-on-error: true
-    
+
     steps:
     - name: 检出代码
       uses: actions/checkout@v4
-    
+
     - name: 设置Python环境
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-    
+
     - name: 安装依赖
       run: |
         pip install --upgrade pip
         pip install -r requirements.txt
-    
-    - name: 创建数据目录
-      run: mkdir -p data
-    
+
+    - name: 恢复历史去重记录
+      uses: actions/cache@v4
+      with:
+        path: data/
+        key: sanzi-history-${{ runner.os }}
+        restore-keys: |
+          sanzi-history-
+
     - name: 运行采集程序
       run: python main.py
       env:
@@ -41,7 +45,7 @@ jobs:
         SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
         SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
         RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
-    
+
     - name: 上传日志和简报
       if: always()
       uses: actions/upload-artifact@v4
